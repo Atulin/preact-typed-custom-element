@@ -1,12 +1,14 @@
 import {
+	type Attributes,
 	type ComponentClass,
 	type FunctionComponent,
 	type FunctionalComponent,
 	cloneElement,
 	h,
 	hydrate,
-	render
+	render, VNode, Component
 } from 'preact';
+import type { ComponentType } from 'preact/compat';
 
 type ComponentDefinition<TProps extends object> = (
 	| FunctionComponent<TProps>
@@ -50,63 +52,103 @@ type PreactCustomElement<TProps extends object> = HTMLElement & {
  * });
  * ```
  */
-export default function register<TProps extends object, T extends ComponentDefinition<TProps>>(
+export default function register<
+	TProps extends object,
+	T extends ComponentDefinition<TProps>,
+>(
 	Component: T,
 	tagName?: `${string}-${string}`,
 	propNames?: (keyof TProps)[],
 	options?: Options
 ) {
-	function PreactElement() {
-		const inst: PreactCustomElement<TProps> = Reflect.construct(
-			HTMLElement,
-			[],
-			PreactElement
-		);
+	class PreactElement
+		extends HTMLElement
+		implements Partial<PreactCustomElement<TProps>> {
+		_vdomComponent: ComponentDefinition<TProps>;
+		_root: ShadowRoot | HTMLElement;
+		_vdom: ReturnType<typeof h> | null = null;
+		_props?: Partial<TProps>;
 
-		inst._vdomComponent = Component;
+		static observedAttributes = propNames as string[];
 
-		inst._root = options?.shadow
-			? inst.attachShadow({ mode: options.shadow || 'open' })
-			: inst;
+		constructor() {
+			super(); // Always call super() first in constructor
 
-		return inst;
-	}
+			this._vdomComponent = Component;
+			this._root = options?.shadow
+				? this.attachShadow({ mode: options.shadow || 'open' })
+				: this;
 
-	PreactElement.prototype = Object.create(HTMLElement.prototype);
-	PreactElement.prototype.constructor = PreactElement;
-	PreactElement.prototype.connectedCallback = connectedCallback;
-	PreactElement.prototype.attributeChangedCallback = attributeChangedCallback;
-	PreactElement.prototype.disconnectedCallback = disconnectedCallback;
+			const propsToDefine =
+				propNames || (PreactElement.observedAttributes as (keyof TProps)[]);
 
-	if (!propNames && 'observedAttributes' in Component) {
-		propNames = Component.observedAttributes;
-	} else if (!propNames && 'propTypes' in Component) {
-		propNames = Object.keys(Component.propTypes) as (keyof TProps)[];
-	}
+			for (const name of propsToDefine) {
+				Object.defineProperty(this, name, {
+					get() {
+						return this._vdom ? this._vdom.props[name] : this._props?.[name];
+					},
+					set(v) {
+						if (this._vdom) {
+							// Directly call the class method
+							this.attributeChangedCallback(String(name), null, v);
+						} else {
+							if (!this._props) this._props = {};
+							this._props[name] = v;
+						}
 
-	PreactElement.observedAttributes = propNames;
-
-	// Keep DOM properties and Preact props in sync
-	for (const name of propNames) {
-		Object.defineProperty(PreactElement.prototype, name, {
-			get() {
-				return this._vdom ? this._vdom.props[name] : this._props?.[name];
-			},
-			set(v) {
-				if (this._vdom) {
-					this.attributeChangedCallback(name, null, v);
-				} else {
-					if (!this._props) this._props = {};
-					this._props[name] = v;
-					this.connectedCallback();
-				}
-
-				// Reflect property changes to attributes if the value is a primitive
-				if (v == null || ['string', 'boolean', 'number'].includes(typeof v)) {
-					this.setAttribute(name, v);
-				}
+						// Reflect property changes to attributes if the value is a primitive
+						if (
+							v == null ||
+							['string', 'boolean', 'number'].includes(typeof v)
+						) {
+							this.setAttribute(String(name), String(v));
+						}
+					},
+					configurable: true,
+					enumerable: true
+				});
 			}
-		});
+		}
+
+		connectedCallback() {
+			const event = new CustomEvent('_preact', {
+				detail: {} as Record<string, unknown>,
+				bubbles: true,
+				cancelable: true
+			});
+			this.dispatchEvent(event);
+			const context = event.detail?.['context'];
+
+			this._vdom = h(
+				ContextProvider,
+				{ ...this._props, context },
+				toVdom(this, this._vdomComponent)
+			);
+			(this.hasAttribute('hydrate') ? hydrate : render)(this._vdom, this._root);
+		}
+
+		attributeChangedCallback(
+			this: PreactCustomElement<{}>,
+			name: string,
+			oldValue: unknown,
+			newValue: unknown
+		) {
+			if (!this._vdom) return;
+			// Attributes use `null` as an empty value whereas `undefined` is more
+			// common in pure JS components, especially with default parameters.
+			// When calling `node.removeAttribute()` we'll receive `null` as the new
+			// value. See issue #50.
+			newValue = newValue == null ? undefined : newValue;
+			const props: Record<string, unknown> = {};
+			props[name] = newValue;
+			props[toCamelCase(name)] = newValue;
+			this._vdom = cloneElement(this._vdom, props);
+			render(this._vdom, this._root);
+		}
+
+		disconnectedCallback() {
+			render((this._vdom = null), this._root);
+		}
 	}
 
 	return customElements.define(
@@ -115,35 +157,12 @@ export default function register<TProps extends object, T extends ComponentDefin
 	);
 }
 
-function ContextProvider(props) {
+const ContextProvider: ComponentType<any> = function(this: Component, props) {
 	this.getChildContext = () => props.context;
 	// eslint-disable-next-line no-unused-vars
 	const { context, children, ...rest } = props;
 	return cloneElement(children, rest);
-}
-
-function connectedCallback(this: PreactCustomElement<{}>) {
-	// Obtain a reference to the previous context by pinging the nearest
-	// higher up node that was rendered with Preact. If one Preact component
-	// higher up receives our ping, it will set the `detail` property of
-	// our custom event. This works because events are dispatched
-	// synchronously.
-	const event = new CustomEvent('_preact', {
-		detail: {},
-		bubbles: true,
-		cancelable: true
-	});
-
-	this.dispatchEvent(event);
-	const context = event.detail?.['context'];
-
-	this._vdom = h(
-		ContextProvider,
-		{ ...this._props, context },
-		toVdom(this, this._vdomComponent)
-	);
-	(this.hasAttribute('hydrate') ? hydrate : render)(this._vdom, this._root);
-}
+};
 
 /**
  * Camel-cases a string
@@ -155,45 +174,13 @@ function toCamelCase(str: string) {
 }
 
 /**
- * Changed whenever an attribute of the HTML element changed
- * @param {string} name The attribute name
- * @param {unknown} oldValue The old value or undefined
- * @param {unknown} newValue The new value
- */
-function attributeChangedCallback(
-	this: PreactCustomElement<{}>,
-	name: string,
-	oldValue: unknown,
-	newValue: unknown
-) {
-	if (!this._vdom) return;
-	// Attributes use `null` as an empty value whereas `undefined` is more
-	// common in pure JS components, especially with default parameters.
-	// When calling `node.removeAttribute()` we'll receive `null` as the new
-	// value. See issue #50.
-	newValue = newValue == null ? undefined : newValue;
-	const props = {};
-	props[name] = newValue;
-	props[toCamelCase(name)] = newValue;
-	this._vdom = cloneElement(this._vdom, props);
-	render(this._vdom, this._root);
-}
-
-/**
- * @this {PreactCustomElement}
- */
-function disconnectedCallback() {
-	render((this._vdom = null), this._root);
-}
-
-/**
  * Pass an event listener to each `<slot>` that "forwards" the current
  * context value to the rendered child. The child will trigger a custom
  * event, where will add the context value to. Because events work
  * synchronously, the child can immediately pull of the value right
  * after having fired the event.
  */
-function Slot<T>(props: T, context) {
+const Slot: ComponentType<any> = function <T>(this: Component, props: T, context) {
 	const ref = (r) => {
 		if (!r) {
 			this.ref.removeEventListener('_preact', this._listener);
@@ -208,13 +195,14 @@ function Slot<T>(props: T, context) {
 			}
 		}
 	};
+
 	return h('slot', { ...props, ref });
-}
+};
 
 const isComment = (node: Node): node is Comment => node.nodeType === 3;
 const isElement = (node: Node): node is Element => node.nodeType === 1;
 
-function toVdom(element: Node, nodeName: string | null) {
+function toVdom(element: Node, nodeName: string | null): VNode<any> | string | null {
 	if (isComment(element)) {
 		return element.data;
 	}
@@ -223,14 +211,15 @@ function toVdom(element: Node, nodeName: string | null) {
 	}
 
 	const children = [];
-	const props = {};
+	const props: Record<string, string | VNode<any>> = {};
 	const a = element.attributes;
 	const cn = element.childNodes;
 
-	for (let i = a.length; i--;) {
-		if (a[i].name !== 'slot') {
-			props[a[i].name] = a[i].value;
-			props[toCamelCase(a[i].name)] = a[i].value;
+
+	for (const { name, value } of a) {
+		if (name !== 'slot') {
+			props[name] = value;
+			props[toCamelCase(name)] = value;
 		}
 	}
 
@@ -239,7 +228,7 @@ function toVdom(element: Node, nodeName: string | null) {
 		// Move slots correctly
 		const name = cn[i].slot;
 		if (name) {
-			props[name] = h(Slot, { name }, vnode);
+			props[name] = h(Slot, { name } as Attributes, vnode);
 		} else {
 			children[i] = vnode;
 		}
