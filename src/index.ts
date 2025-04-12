@@ -1,20 +1,33 @@
-import { h, cloneElement, render, hydrate } from 'preact';
+import {
+	type ComponentClass,
+	type FunctionComponent,
+	type FunctionalComponent,
+	cloneElement,
+	h,
+	hydrate,
+	render,
+} from "preact";
+
+type ComponentDefinition<TProps> = (
+	| FunctionComponent<TProps>
+	| ComponentClass<TProps>
+	| FunctionalComponent<TProps>
+) & {
+	observedAttributes?: (keyof TProps)[];
+	propTypes?: Record<keyof TProps, unknown>;
+	tagName?: `${string}-${string}`;
+};
+
+type Options = { shadow: false } | { shadow: true; mode: "open" | "closed" };
+
+type PreactCustomElement<TProps> = HTMLElement & {
+	_root: ShadowRoot | HTMLElement;
+	_vdomComponent: ComponentDefinition<TProps>;
+	_vdom: ReturnType<typeof h> | null;
+};
 
 /**
- * @typedef {import('preact').FunctionComponent<any> | import('preact').ComponentClass<any> | import('preact').FunctionalComponent<any> } ComponentDefinition
- * @typedef {{ shadow: false } | { shadow: true, mode: 'open' | 'closed'}} Options
- * @typedef {HTMLElement & { _root: ShadowRoot | HTMLElement, _vdomComponent: ComponentDefinition, _vdom: ReturnType<typeof import("preact").h> | null }} PreactCustomElement
- */
-
-/**
- * Register a preact component as web-component.
- * @param {ComponentDefinition} Component The preact component to register
- * @param {string} [tagName] The HTML element tag-name (must contain a hyphen and be lowercase)
- * @param {string[]} [propNames] HTML element attributes to observe
- * @param {Options} [options] Additional element options
- * @example
  * ```ts
- * // use custom web-component class
  * class PreactWebComponent extends Component {
  *   static tagName = 'my-web-component';
  *   render() {
@@ -37,35 +50,42 @@ import { h, cloneElement, render, hydrate } from 'preact';
  * });
  * ```
  */
-export default function register(Component, tagName, propNames, options) {
+export default function register<TProps, T extends ComponentDefinition<TProps>>(
+	Component: T,
+	tagName?: `${string}-${string}`,
+	propNames?: (keyof TProps)[],
+	options?: Options,
+) {
 	function PreactElement() {
-		const inst = /** @type {PreactCustomElement} */ (
-			Reflect.construct(HTMLElement, [], PreactElement)
+		const inst: PreactCustomElement<TProps> = Reflect.construct(
+			HTMLElement,
+			[],
+			PreactElement,
 		);
 		inst._vdomComponent = Component;
 		inst._root =
 			options && options.shadow
-				? inst.attachShadow({ mode: options.mode || 'open' })
+				? inst.attachShadow({ mode: options.mode || "open" })
 				: inst;
 		return inst;
 	}
+
 	PreactElement.prototype = Object.create(HTMLElement.prototype);
 	PreactElement.prototype.constructor = PreactElement;
 	PreactElement.prototype.connectedCallback = connectedCallback;
 	PreactElement.prototype.attributeChangedCallback = attributeChangedCallback;
 	PreactElement.prototype.disconnectedCallback = disconnectedCallback;
 
-	/**
-	 * @type {string[]}
-	 */
-	propNames =
-		propNames ||
-		Component.observedAttributes ||
-		Object.keys(Component.propTypes || {});
+	if (!propNames && "observedAttributes" in Component) {
+		propNames = Component.observedAttributes;
+	} else if (!propNames && "propTypes" in Component) {
+		propNames = Object.keys(Component.propTypes) as (keyof TProps)[];
+	}
+
 	PreactElement.observedAttributes = propNames;
 
 	// Keep DOM properties and Preact props in sync
-	propNames.forEach((name) => {
+	for (const name of propNames) {
 		Object.defineProperty(PreactElement.prototype, name, {
 			get() {
 				return this._vdom.props[name];
@@ -80,22 +100,16 @@ export default function register(Component, tagName, propNames, options) {
 				}
 
 				// Reflect property changes to attributes if the value is a primitive
-				const type = typeof v;
-				if (
-					v == null ||
-					type === 'string' ||
-					type === 'boolean' ||
-					type === 'number'
-				) {
+				if (v == null || ["string", "boolean", "number"].includes(typeof v)) {
 					this.setAttribute(name, v);
 				}
 			},
 		});
-	});
+	}
 
 	return customElements.define(
-		tagName || Component.tagName || Component.displayName || Component.name,
-		PreactElement
+		tagName ?? Component.tagName ?? Component.displayName ?? Component.name,
+		PreactElement,
 	);
 }
 
@@ -115,20 +129,21 @@ function connectedCallback() {
 	// higher up receives our ping, it will set the `detail` property of
 	// our custom event. This works because events are dispatched
 	// synchronously.
-	const event = new CustomEvent('_preact', {
+	const event = new CustomEvent("_preact", {
 		detail: {},
 		bubbles: true,
 		cancelable: true,
 	});
+
 	this.dispatchEvent(event);
-	const context = event.detail.context;
+	const context = event.detail["context"];
 
 	this._vdom = h(
 		ContextProvider,
 		{ ...this._props, context },
-		toVdom(this, this._vdomComponent)
+		toVdom(this, this._vdomComponent),
 	);
-	(this.hasAttribute('hydrate') ? hydrate : render)(this._vdom, this._root);
+	(this.hasAttribute("hydrate") ? hydrate : render)(this._vdom, this._root);
 }
 
 /**
@@ -136,18 +151,22 @@ function connectedCallback() {
  * @param {string} str The string to transform to camelCase
  * @returns camel case version of the string
  */
-function toCamelCase(str) {
-	return str.replace(/-(\w)/g, (_, c) => (c ? c.toUpperCase() : ''));
+function toCamelCase(str: string) {
+	return str.replace(/-(\w)/g, (_, c) => (c ? c.toUpperCase() : ""));
 }
 
 /**
- * Changed whenver an attribute of the HTML element changed
+ * Changed whenever an attribute of the HTML element changed
  * @this {PreactCustomElement}
  * @param {string} name The attribute name
  * @param {unknown} oldValue The old value or undefined
  * @param {unknown} newValue The new value
  */
-function attributeChangedCallback(name, oldValue, newValue) {
+function attributeChangedCallback(
+	name: string,
+	oldValue: unknown,
+	newValue: unknown,
+) {
 	if (!this._vdom) return;
 	// Attributes use `null` as an empty value whereas `undefined` is more
 	// common in pure JS components, especially with default parameters.
@@ -175,10 +194,10 @@ function disconnectedCallback() {
  * synchronously, the child can immediately pull of the value right
  * after having fired the event.
  */
-function Slot(props, context) {
+function Slot<T>(props: T, context) {
 	const ref = (r) => {
 		if (!r) {
-			this.ref.removeEventListener('_preact', this._listener);
+			this.ref.removeEventListener("_preact", this._listener);
 		} else {
 			this.ref = r;
 			if (!this._listener) {
@@ -186,29 +205,37 @@ function Slot(props, context) {
 					event.stopPropagation();
 					event.detail.context = context;
 				};
-				r.addEventListener('_preact', this._listener);
+				r.addEventListener("_preact", this._listener);
 			}
 		}
 	};
-	return h('slot', { ...props, ref });
+	return h("slot", { ...props, ref });
 }
 
-function toVdom(element, nodeName) {
-	if (element.nodeType === 3) return element.data;
-	if (element.nodeType !== 1) return null;
-	let children = [],
-		props = {},
-		i = 0,
-		a = element.attributes,
-		cn = element.childNodes;
-	for (i = a.length; i--; ) {
-		if (a[i].name !== 'slot') {
+const isComment = (node: Node): node is Comment => node.nodeType === 3;
+const isElement = (node: Node): node is Element => node.nodeType === 1;
+
+function toVdom(element: Node, nodeName: string) {
+	if (isComment(element)) {
+		return element.data;
+	}
+	if (!isElement(element)) {
+		return null;
+	}
+
+	const children = [];
+	const props = {};
+	const a = element.attributes;
+	const cn = element.childNodes;
+
+	for (let i = a.length; i--; ) {
+		if (a[i].name !== "slot") {
 			props[a[i].name] = a[i].value;
 			props[toCamelCase(a[i].name)] = a[i].value;
 		}
 	}
 
-	for (i = cn.length; i--; ) {
+	for (let i = cn.length; i--; ) {
 		const vnode = toVdom(cn[i], null);
 		// Move slots correctly
 		const name = cn[i].slot;
