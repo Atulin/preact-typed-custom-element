@@ -62,9 +62,7 @@ export default function register<TProps extends object, T extends ComponentDefin
 			[],
 			PreactElement
 		);
-
 		inst._vdomComponent = Component;
-
 		inst._root = options?.shadow
 			? inst.attachShadow({ mode: options.shadow || 'open' })
 			: inst;
