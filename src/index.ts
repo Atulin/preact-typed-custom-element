@@ -1,12 +1,14 @@
 import {
 	type Attributes,
+	type Component,
 	type ComponentClass,
 	type FunctionComponent,
 	type FunctionalComponent,
+	type VNode,
 	cloneElement,
 	h,
 	hydrate,
-	render, VNode, Component
+	render
 } from 'preact';
 import type { ComponentType } from 'preact/compat';
 
@@ -52,18 +54,13 @@ type PreactCustomElement<TProps extends object> = HTMLElement & {
  * });
  * ```
  */
-export default function register<
-	TProps extends object,
-	T extends ComponentDefinition<TProps>,
->(
+export default function register<TProps extends object, T extends ComponentDefinition<TProps>>(
 	Component: T,
 	tagName?: `${string}-${string}`,
 	propNames?: (keyof TProps)[],
-	options?: Options
+	options: Options = { shadow: 'open' }
 ) {
-	class PreactElement
-		extends HTMLElement
-		implements Partial<PreactCustomElement<TProps>> {
+	class PreactElement extends HTMLElement implements Partial<PreactCustomElement<TProps>> {
 		_vdomComponent: ComponentDefinition<TProps>;
 		_root: ShadowRoot | HTMLElement;
 		_vdom: ReturnType<typeof h> | null = null;
@@ -75,12 +72,9 @@ export default function register<
 			super(); // Always call super() first in constructor
 
 			this._vdomComponent = Component;
-			this._root = options?.shadow
-				? this.attachShadow({ mode: options.shadow || 'open' })
-				: this;
+			this._root = options?.shadow ? this.attachShadow({ mode: options.shadow }) : this;
 
-			const propsToDefine =
-				propNames || (PreactElement.observedAttributes as (keyof TProps)[]);
+			const propsToDefine = propNames || (PreactElement.observedAttributes as (keyof TProps)[]);
 
 			for (const name of propsToDefine) {
 				Object.defineProperty(this, name, {
@@ -97,10 +91,7 @@ export default function register<
 						}
 
 						// Reflect property changes to attributes if the value is a primitive
-						if (
-							v == null ||
-							['string', 'boolean', 'number'].includes(typeof v)
-						) {
+						if (v == null || ['string', 'boolean', 'number'].includes(typeof v)) {
 							this.setAttribute(String(name), String(v));
 						}
 					},
@@ -119,20 +110,11 @@ export default function register<
 			this.dispatchEvent(event);
 			const context = event.detail?.['context'];
 
-			this._vdom = h(
-				ContextProvider,
-				{ ...this._props, context },
-				toVdom(this, this._vdomComponent)
-			);
+			this._vdom = h(ContextProvider, { ...this._props, context }, toVdom(this, this._vdomComponent));
 			(this.hasAttribute('hydrate') ? hydrate : render)(this._vdom, this._root);
 		}
 
-		attributeChangedCallback(
-			this: PreactCustomElement<{}>,
-			name: string,
-			oldValue: unknown,
-			newValue: unknown
-		) {
+		attributeChangedCallback(this: PreactCustomElement<{}>, name: string, oldValue: unknown, newValue: unknown) {
 			if (!this._vdom) return;
 			// Attributes use `null` as an empty value whereas `undefined` is more
 			// common in pure JS components, especially with default parameters.
@@ -173,6 +155,16 @@ function toCamelCase(str: string) {
 	return str.replace(/-(\w)/g, (_, c) => (c ? c.toUpperCase() : ''));
 }
 
+
+class PreactEvent extends Event {
+	detail: Record<string, unknown> = {};
+}
+
+declare global {
+	interface ElementEventMap {
+		'_preact': PreactEvent;
+	}
+}
 /**
  * Pass an event listener to each `<slot>` that "forwards" the current
  * context value to the rendered child. The child will trigger a custom
@@ -180,16 +172,22 @@ function toCamelCase(str: string) {
  * synchronously, the child can immediately pull of the value right
  * after having fired the event.
  */
-const Slot: ComponentType<any> = function <T>(this: Component, props: T, context) {
-	const ref = (r) => {
+const Slot: ComponentType<any> = function <T>(
+	this: Component & { ref: Element; _listener: EventListener },
+	props: T,
+	context: unknown
+) {
+	const ref = (r: Element | undefined) => {
 		if (!r) {
 			this.ref.removeEventListener('_preact', this._listener);
 		} else {
 			this.ref = r;
 			if (!this._listener) {
-				this._listener = (event) => {
+				this._listener = (event: CustomEventInit<Record<string, unknown>> & Event) => {
 					event.stopPropagation();
-					event.detail.context = context;
+					if (event.detail) {
+						event.detail['context'] = context;
+					}
 				};
 				r.addEventListener('_preact', this._listener);
 			}
@@ -213,8 +211,7 @@ function toVdom(element: Node, nodeName: string | null): VNode<any> | string | n
 	const children = [];
 	const props: Record<string, string | VNode<any>> = {};
 	const a = element.attributes;
-	const cn = element.childNodes;
-
+	const cn: NodeListOf<ChildNode & { slot?: string }> = element.childNodes;
 
 	for (const { name, value } of a) {
 		if (name !== 'slot') {
